@@ -1,9 +1,9 @@
 """
-Step 2: Fetch street centerlines via Overpass API (OpenStreetMap).
+Step 2: Fetch street centerlines from data.nola.gov (dataset 22q2-dqpb).
 
-Replaces the defunct data.nola.gov endpoint (dataset vdeh-g3jq, HTTP 404).
-Outputs data/centerlines.geojson — a FeatureCollection of LineString features
-covering the French Quarter / CBD bounding box.
+Each record includes address ranges (fromleft/toleft/fromright/toright) per
+segment, which step 3 uses to match meters by street name + block number.
+Outputs data/centerlines.geojson.
 """
 
 import json
@@ -12,100 +12,96 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Optional
 
-# FQ/CBD bounding box derived from the meter data extent plus a small buffer.
-# Overpass bbox order: (south, west, north, east)
-BBOX = (29.927, -90.087, 29.968, -90.055)
+BBOX = (29.927, -90.087, 29.968, -90.055)  # (south, west, north, east)
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-
-# Street types to include — excludes footways, cycleways, construction, etc.
-HIGHWAY_FILTER = (
-    "residential|primary|secondary|tertiary|unclassified|"
-    "living_street|service|trunk|motorway|"
-    "motorway_link|trunk_link|primary_link|secondary_link|tertiary_link"
-)
-
-OVERPASS_QUERY = f"""
-[out:json][timeout:90];
-(
-  way["highway"~"^({HIGHWAY_FILTER})$"]
-  ({BBOX[0]},{BBOX[1]},{BBOX[2]},{BBOX[3]});
-);
-out geom;
-""".strip()
-
+API_BASE  = "https://data.nola.gov/resource/22q2-dqpb.json"
+PAGE_SIZE = 1000
 OUTPUT_PATH = Path(__file__).parent.parent / "data" / "centerlines.geojson"
 
 
-def fetch_overpass(query: str, retries: int = 3, backoff: float = 5.0) -> dict:
-    data = ("data=" + urllib.parse.quote(query)).encode()
+def fetch_page(offset: int, retries: int = 3) -> list:
+    params = urllib.parse.urlencode({
+        "$where":  f"within_box(the_geom,{BBOX[0]},{BBOX[1]},{BBOX[2]},{BBOX[3]})",
+        "$limit":  PAGE_SIZE,
+        "$offset": offset,
+        "$order":  "objectid",
+    })
+    url = f"{API_BASE}?{params}"
     for attempt in range(retries):
         try:
             req = urllib.request.Request(
-                OVERPASS_URL,
-                data=data,
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": "NOParking-pipeline/1.0 (github NOParking)",
-                },
+                url,
+                headers={"Accept": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as exc:
-            if exc.code == 429 or exc.code >= 500:
-                wait = backoff * (attempt + 1)
-                print(f"  HTTP {exc.code} — retrying in {wait:.0f}s…")
-                time.sleep(wait)
-            else:
-                raise
         except (urllib.error.URLError, TimeoutError) as exc:
-            wait = backoff * (attempt + 1)
-            print(f"  Network error ({exc}) — retrying in {wait:.0f}s…")
+            wait = 5 * (attempt + 1)
+            print(f"  Network error ({exc}) — retrying in {wait}s…")
             time.sleep(wait)
-    raise RuntimeError(f"Overpass query failed after {retries} attempts")
+    raise RuntimeError(f"API request failed after {retries} attempts (offset={offset})")
 
 
-def way_to_feature(element: dict) -> Optional[dict]:
-    """Convert an Overpass way element (with inline geometry) to GeoJSON Feature."""
-    if "geometry" not in element:
-        return None
-    coords = [[pt["lon"], pt["lat"]] for pt in element["geometry"]]
-    if len(coords) < 2:
-        return None
-    tags = element.get("tags", {})
-    return {
-        "type": "Feature",
-        "geometry": {"type": "LineString", "coordinates": coords},
-        "properties": {
-            "osm_id": element["id"],
-            "name": tags.get("name", ""),
-            "highway": tags.get("highway", ""),
-            "oneway": tags.get("oneway", ""),
-            "lanes": tags.get("lanes", ""),
-            "surface": tags.get("surface", ""),
-            "maxspeed": tags.get("maxspeed", ""),
-        },
+def record_to_features(rec: dict) -> list:
+    """Expand a MultiLineString record into individual LineString features."""
+    geom = rec.get("the_geom")
+    if not geom or geom["type"] != "MultiLineString":
+        return []
+
+    props = {
+        "centerlineid": rec.get("centerlineid", ""),
+        "fullname":     rec.get("fullname", ""),
+        "fullnameabv":  rec.get("fullnameabv", ""),
+        "fromleft":     _int(rec.get("fromleft")),
+        "toleft":       _int(rec.get("toleft")),
+        "fromright":    _int(rec.get("fromright")),
+        "toright":      _int(rec.get("toright")),
+        "roadclass":    rec.get("roadclass", ""),
     }
+
+    return [
+        {
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": line},
+            "properties": props,
+        }
+        for line in geom["coordinates"]
+        if len(line) >= 2
+    ]
+
+
+def _int(val):
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
 
 
 def main():
-    print("Querying Overpass API for street centerlines…")
+    print("Fetching NOLA centerlines from data.nola.gov…")
     print(f"  Bounding box: {BBOX}")
-    result = fetch_overpass(OVERPASS_QUERY)
 
-    elements = result.get("elements", [])
-    ways = [e for e in elements if e.get("type") == "way"]
-    print(f"  Received {len(ways)} way elements")
+    all_features = []
+    offset = 0
+    while True:
+        print(f"  Page offset {offset}…")
+        records = fetch_page(offset)
+        if not records:
+            break
+        for rec in records:
+            all_features.extend(record_to_features(rec))
+        if len(records) < PAGE_SIZE:
+            break
+        offset += PAGE_SIZE
 
-    features = [f for f in (way_to_feature(w) for w in ways) if f is not None]
-    print(f"  Converted {len(features)} features")
-
-    geojson = {"type": "FeatureCollection", "features": features}
+    print(f"  {len(all_features)} LineString features from {offset + len(records)} records")
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(geojson), encoding="utf-8")
+    OUTPUT_PATH.write_text(
+        json.dumps({"type": "FeatureCollection", "features": all_features}),
+        encoding="utf-8",
+    )
     print(f"  Saved → {OUTPUT_PATH}")
 
 

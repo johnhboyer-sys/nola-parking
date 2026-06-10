@@ -1,14 +1,17 @@
 """
 Step 3: Generate ParkMobile-style block-face segments.
 
-Groups meters by ParkMobile zone ID, snaps each group to its nearest OSM
-centerline, and extracts the sub-segment spanned by that zone's meter points.
-Outputs data/meter_segments.geojson — a FeatureCollection of LineStrings
-intended to replace the individual meter dots in the UI.
+Groups meters by ParkMobile zone ID, matches each group to its centerline using
+street-name + block-number matching (primary) with distance-based fallback, then
+extracts the sub-segment spanned by that zone's meters.  Gaps > GAP_SPLIT_M
+between consecutive meters are treated as no-parking breaks and split the zone
+into separate features.
+Outputs data/meter_segments.geojson.
 """
 
 import json
 import math
+import re
 from pathlib import Path
 
 METERS_PATH      = Path(__file__).parent.parent / "data" / "meters.geojson"
@@ -19,9 +22,24 @@ OUTPUT_PATH      = Path(__file__).parent.parent / "data" / "meter_segments.geojs
 M_PER_DEG_LAT = 111_000
 M_PER_DEG_LON =  96_200
 
-SNAP_RADIUS_M = 60   # ignore centerlines further than this from a zone centroid
+SNAP_RADIUS_M = 60   # fallback: ignore centerlines further than this
 MIN_SEG_M     = 15   # minimum rendered segment length (pads single-meter zones)
 GAP_SPLIT_M   = 18   # gaps larger than this between consecutive meters → split segment
+
+# Road-type suffixes to strip when normalising street names for comparison
+_SUFFIXES = {
+    "street", "st", "avenue", "ave", "boulevard", "blvd", "drive", "dr",
+    "road", "rd", "lane", "ln", "court", "ct", "place", "pl",
+    "highway", "hwy", "expressway", "expy", "way",
+}
+
+def _norm(name: str) -> str:
+    """Lowercase, remove punctuation, strip trailing road-type suffix."""
+    name = re.sub(r"[.\-,]", "", name.lower()).strip()
+    parts = name.split()
+    if parts and parts[-1] in _SUFFIXES:
+        parts = parts[:-1]
+    return " ".join(parts)
 
 
 # ── Geometry helpers ──────────────────────────────────────────────────────────
@@ -92,29 +110,61 @@ def seg_length_m(coords, gt_start, gt_end):
     return sum(dist_m(*pts[i], *pts[i + 1]) for i in range(len(pts) - 1))
 
 
+def _safe_int(val):
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _block_in_range(block: int, cl: dict) -> bool:
+    """True if block number falls within either side's address range."""
+    for lo_key, hi_key in (("fromleft", "toleft"), ("fromright", "toright")):
+        lo = cl.get(lo_key)
+        hi = cl.get(hi_key)
+        if lo is not None and hi is not None:
+            lo_i, hi_i = min(lo, hi), max(lo, hi)
+            # Allow the full hundred-block (e.g., block 800 → 800–899)
+            if lo_i <= block <= hi_i + 99:
+                return True
+    return False
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     meters_fc = json.loads(METERS_PATH.read_text())
     cl_fc     = json.loads(CENTERLINES_PATH.read_text())
 
-    centerlines = [
-        {
-            "osm_id": f["properties"]["osm_id"],
-            "name":   f["properties"]["name"],
-            "coords": f["geometry"]["coordinates"],
-            # Precompute bbox for fast filtering
+    centerlines = []
+    for f in cl_fc["features"]:
+        if f["geometry"]["type"] != "LineString":
+            continue
+        coords = f["geometry"]["coordinates"]
+        if len(coords) < 2:
+            continue
+        p = f["properties"]
+        centerlines.append({
+            "name":      p.get("fullname", "") or p.get("name", ""),
+            "nameabv":   p.get("fullnameabv", ""),
+            "norm":      _norm(p.get("fullnameabv", "") or p.get("fullname", "") or p.get("name", "")),
+            "fromleft":  p.get("fromleft"),
+            "toleft":    p.get("toleft"),
+            "fromright": p.get("fromright"),
+            "toright":   p.get("toright"),
+            "coords":    coords,
             "bbox": (
-                min(c[0] for c in f["geometry"]["coordinates"]),
-                min(c[1] for c in f["geometry"]["coordinates"]),
-                max(c[0] for c in f["geometry"]["coordinates"]),
-                max(c[1] for c in f["geometry"]["coordinates"]),
+                min(c[0] for c in coords),
+                min(c[1] for c in coords),
+                max(c[0] for c in coords),
+                max(c[1] for c in coords),
             ),
-        }
-        for f in cl_fc["features"]
-        if f["geometry"]["type"] == "LineString"
-           and len(f["geometry"]["coordinates"]) >= 2
-    ]
+        })
+
+    # Build a lookup from normalised street name → list of centerlines
+    cl_by_name: dict[str, list] = {}
+    for cl in centerlines:
+        cl_by_name.setdefault(cl["norm"], []).append(cl)
 
     # Group meters by ParkMobile zone ID
     zones: dict[str, list] = {}
@@ -136,24 +186,45 @@ def main():
         cx   = sum(lons) / len(lons)
         cy   = sum(lats) / len(lats)
 
-        # Candidates: centerlines whose bbox overlaps the snap search box
-        candidates = []
-        for cl in centerlines:
-            minx, miny, maxx, maxy = cl["bbox"]
-            if maxx < cx - r_lon or minx > cx + r_lon:
-                continue
-            if maxy < cy - r_lat or miny > cy + r_lat:
-                continue
-            snap = snap_to_line(cx, cy, cl["coords"])
-            if snap and snap[2] <= SNAP_RADIUS_M:
-                candidates.append((snap[2], cl))
+        # ── Primary: name + block-number match ───────────────────────────
+        meter_street = meters[0]["properties"].get("street", "")
+        meter_block  = _safe_int(meters[0]["properties"].get("block"))
+        norm_street  = _norm(meter_street)
 
-        if not candidates:
-            skipped += 1
-            continue
+        best_cl = None
+        name_candidates = cl_by_name.get(norm_street, [])
+        if name_candidates and meter_block is not None:
+            # Prefer the segment whose address range contains this block number
+            block_matches = [
+                cl for cl in name_candidates
+                if _block_in_range(meter_block, cl)
+            ]
+            pool = block_matches if block_matches else name_candidates
+            # Among the pool pick the spatially closest
+            scored = []
+            for cl in pool:
+                snap = snap_to_line(cx, cy, cl["coords"])
+                if snap:
+                    scored.append((snap[2], cl))
+            if scored:
+                best_cl = min(scored, key=lambda x: x[0])[1]
 
-        # Nearest centerline wins
-        best_cl = min(candidates, key=lambda x: x[0])[1]
+        # ── Fallback: nearest centerline within snap radius ───────────────
+        if best_cl is None:
+            candidates = []
+            for cl in centerlines:
+                minx, miny, maxx, maxy = cl["bbox"]
+                if maxx < cx - r_lon or minx > cx + r_lon:
+                    continue
+                if maxy < cy - r_lat or miny > cy + r_lat:
+                    continue
+                snap = snap_to_line(cx, cy, cl["coords"])
+                if snap and snap[2] <= SNAP_RADIUS_M:
+                    candidates.append((snap[2], cl))
+            if not candidates:
+                skipped += 1
+                continue
+            best_cl = min(candidates, key=lambda x: x[0])[1]
 
         # Project every meter in the zone onto the centerline, keep meter ref
         snapped = []
