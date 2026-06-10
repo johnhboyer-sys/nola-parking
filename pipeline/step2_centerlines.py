@@ -104,6 +104,18 @@ def main():
     )
     print(f"  Saved → {OUTPUT_PATH}")
 
+    # Geometry-only copy for the frontend red base layer (no address-range properties needed)
+    base_features = [
+        {"type": "Feature", "geometry": f["geometry"], "properties": {}}
+        for f in all_features
+    ]
+    base_path = OUTPUT_PATH.parent / "street_base.geojson"
+    base_path.write_text(
+        json.dumps({"type": "FeatureCollection", "features": base_features}),
+        encoding="utf-8",
+    )
+    print(f"  Saved → {base_path}")
+
 
 if __name__ == "__main__":
     main()
