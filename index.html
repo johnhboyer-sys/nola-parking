@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="NOLA Parking">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <title>NOLA Free Parking</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+
+    #map {
+      position: fixed;
+      top: 44px;
+      left: 0; right: 0; bottom: 52px;
+    }
+
+    /* ── Top status bar ── */
+    #status-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 44px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 12px;
+      background: #1a1a1a;
+      color: #fff;
+      font-size: 13px;
+      z-index: 1000;
+      line-height: 1.2;
+    }
+    #status-bar.mode-evening  { background: #166534; }
+    #status-bar.mode-daytime  { background: #1a1a1a; }
+    #status-bar.mode-cleaning { background: #991b1b; }
+
+    #status-text { flex: 1; }
+    #status-time { white-space: nowrap; margin-left: 10px; font-size: 12px; opacity: 0.8; }
+
+    /* ── Bottom disclaimer ── */
+    #disclaimer {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      height: 52px;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0 12px;
+      background: rgba(0,0,0,0.82);
+      color: #ccc;
+      font-size: 11px;
+      text-align: center;
+      z-index: 1000;
+      line-height: 1.35;
+    }
+
+    /* ── Legend ── */
+    #legend {
+      position: absolute;
+      bottom: 62px;
+      right: 10px;
+      background: rgba(255,255,255,0.95);
+      border-radius: 10px;
+      padding: 10px 13px;
+      z-index: 900;
+      font-size: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+      min-width: 195px;
+    }
+    #legend-title {
+      font-weight: 700;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #555;
+      margin-bottom: 7px;
+    }
+    .legend-row { display: flex; align-items: center; gap: 9px; margin: 5px 0; }
+    .swatch-line {
+      width: 26px; height: 5px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+    .swatch-dot {
+      width: 11px; height: 11px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      margin-left: 7px; margin-right: -7px; /* center under the wider swatch */
+    }
+
+    /* ── Locate button ── */
+    #locate-btn {
+      position: absolute;
+      bottom: 62px;
+      left: 10px;
+      width: 40px; height: 40px;
+      background: white;
+      border: none;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      font-size: 20px;
+      cursor: pointer;
+      z-index: 900;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #locate-btn:active { background: #e5e7eb; }
+
+    /* ── Leaflet popup tweaks ── */
+    .leaflet-popup-content { font-size: 13px; line-height: 1.5; }
+    .leaflet-popup-content b { display: block; margin-bottom: 2px; }
+  </style>
+</head>
+<body>
+
+  <div id="status-bar" class="mode-daytime">
+    <span id="status-text">Loading…</span>
+    <span id="status-time"></span>
+  </div>
+
+  <div id="map"></div>
+
+  <div id="legend">
+    <div id="legend-title">Parking guide</div>
+    <div class="legend-row">
+      <div class="swatch-line" style="background:#22c55e"></div>
+      <span>Free up to 2 hrs (RPP zone)</span>
+    </div>
+    <div class="legend-row">
+      <div class="swatch-dot" style="background:#ca8a04; border: 2px solid #854d0e;"></div>
+      <span>Paid meter (free after 7 pm &amp; Sun)</span>
+    </div>
+    <div class="legend-row">
+      <div class="swatch-line" style="background:#ef4444"></div>
+      <span>TOW — street cleaning until noon</span>
+    </div>
+    <div class="legend-row">
+      <div class="swatch-line" style="background:#9ca3af"></div>
+      <span>No data — read the signs</span>
+    </div>
+  </div>
+
+  <button id="locate-btn" title="Find my location">📍</button>
+
+  <div id="disclaimer">
+    Block-level guidance only. Always obey posted signs, hydrants, corners &amp; driveways. Data may be out of date.
+  </div>
+
+  <script>
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FRENCH QUARTER STREET LISTS
+  // Source: user-provided, verified against RPP dataset field names.
+  // Only Zone 2 segments get the cleaning overlay.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Thursday 8 am–noon: street cleaning on river-PARALLEL streets
+  const LONG_STREETS = new Set([
+    'BOURBON ST',
+    'BURGUNDY ST',
+    'CHARTRES ST',
+    'DAUPHINE ST',
+    'ROYAL ST',
+    // Exchange Place and N. Rampart not present in RPP dataset
+  ]);
+
+  // Tuesday 8 am–noon: street cleaning on CROSS streets
+  const CROSS_STREETS = new Set([
+    'BARRACKS ST',
+    'DUMAINE ST',
+    'ESPLANADE AVE',
+    'GOVERNOR NICHOLLS ST',
+    'MADISON ST',
+    'ORLEANS AVE',
+    'ST ANN ST',
+    'ST LOUIS ST',
+    'ST PETER ST',
+    'ST PHILIP ST',
+    'TOULOUSE ST',
+    'URSULINES AVE',
+    // Iberville, Bienville, Conti not present in RPP dataset
+  ]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TIME HELPERS  (New Orleans = America/Chicago, CST/CDT)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  function nolaDate() {
+    // Returns a plain Date object whose .getHours()/.getDay() reflect NOLA local time
+    const str = new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' });
+    return new Date(str);
+  }
+
+  function getParkingMode() {
+    const t    = nolaDate();
+    const day  = t.getDay();          // 0=Sun … 6=Sat
+    const hour = t.getHours() + t.getMinutes() / 60;
+
+    const isWeekdayDaytime = day >= 1 && day <= 6 && hour >= 7 && hour < 19;
+
+    if (!isWeekdayDaytime) return { mode: 'evening', cleaning: null };
+
+    const inCleaningWindow = hour >= 8 && hour < 12;
+    if (inCleaningWindow && day === 2) return { mode: 'cleaning', cleaning: 'cross' };  // Tue
+    if (inCleaningWindow && day === 4) return { mode: 'cleaning', cleaning: 'long'  };  // Thu
+
+    return { mode: 'daytime', cleaning: null };
+  }
+
+  function formatTime() {
+    const t    = nolaDate();
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const h    = t.getHours();
+    const m    = t.getMinutes().toString().padStart(2, '0');
+    return `${days[t.getDay()]} ${h % 12 || 12}:${m} ${h >= 12 ? 'pm' : 'am'}`;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STYLING LOGIC
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  function segmentStyle(feature, mode) {
+    const name = (feature.properties.name || '').toUpperCase().trim();
+    const zone = feature.properties.rppzone || '';
+    const isFQ = zone === 'Zone 2';
+
+    // Cleaning override (French Quarter only)
+    if (isFQ && mode.cleaning === 'cross' && CROSS_STREETS.has(name)) {
+      return { color: '#ef4444', weight: 6, opacity: 0.95, lineCap: 'round' };
+    }
+    if (isFQ && mode.cleaning === 'long'  && LONG_STREETS.has(name)) {
+      return { color: '#ef4444', weight: 6, opacity: 0.95, lineCap: 'round' };
+    }
+
+    if (mode.mode === 'evening') {
+      return { color: '#6b7280', weight: 3, opacity: 0.55, lineCap: 'round' };
+    }
+
+    // Normal daytime: RPP = green
+    return { color: '#22c55e', weight: 5, opacity: 0.85, lineCap: 'round' };
+  }
+
+  function segmentPopup(feature, mode) {
+    const name  = feature.properties.name   || '';
+    const zone  = feature.properties.rppzone || '';
+    const from  = feature.properties.jidfr  || '';
+    const to    = feature.properties.jidto  || '';
+    const nameU = name.toUpperCase().trim();
+    const isFQ  = zone === 'Zone 2';
+
+    const block = (from && to) ? `<span style="color:#555">${from} → ${to}</span><br>` : '';
+
+    if (isFQ && mode.cleaning === 'cross' && CROSS_STREETS.has(nameU)) {
+      return `<b>${name}</b><br>${block}`
+           + `🚨 <b>TOW ZONE</b> — street cleaning<br>`
+           + `No stopping until noon today`;
+    }
+    if (isFQ && mode.cleaning === 'long' && LONG_STREETS.has(nameU)) {
+      return `<b>${name}</b><br>${block}`
+           + `🚨 <b>TOW ZONE</b> — street cleaning<br>`
+           + `No stopping until noon today`;
+    }
+    if (mode.mode === 'evening') {
+      return `<b>${name}</b><br>${block}`
+           + `🌙 Evening/Weekend<br>`
+           + `RPP not enforced — most curbs free`;
+    }
+
+    return `<b>${name}</b><br>${block}`
+         + `✅ <b>Free — up to 2 hrs</b><br>`
+         + `<span style="color:#555">${zone} · 7 am–7 pm Mon–Sat</span><br>`
+         + `<span style="color:#b45309">Over 2 hrs = $75 ticket</span>`;
+  }
+
+  function meterPopup(feature) {
+    const p     = feature.properties;
+    const type  = p.type === 'PS' ? 'Pay station' : 'Single-space meter';
+    const nsp   = parseInt(p.num_spaces, 10) || 1;
+    const pm    = p.parkmobile ? `ParkMobile zone ${p.parkmobile}` : '';
+    return `<b>${p.street} block ${p.block}</b><br>`
+         + `💳 <b>Paid meter</b> — ${type}<br>`
+         + `${nsp} space${nsp !== 1 ? 's' : ''}`
+         + (pm ? `<br><span style="color:#555">${pm}</span>` : '')
+         + `<br><span style="color:#166534">Free after 7 pm &amp; Sundays</span>`;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATUS BAR
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  function updateStatusBar(mode) {
+    const bar  = document.getElementById('status-bar');
+    const text = document.getElementById('status-text');
+    const time = document.getElementById('status-time');
+
+    bar.className = '';
+    if (mode.mode === 'evening') {
+      bar.classList.add('mode-evening');
+      text.textContent = '🌙 Evening/Weekend — meters & RPP zones mostly free';
+    } else if (mode.mode === 'cleaning') {
+      bar.classList.add('mode-cleaning');
+      const which = mode.cleaning === 'cross'
+        ? 'Tue: cross streets (upriver/downriver) tow until noon'
+        : 'Thu: long streets (riverside/lakeside) tow until noon';
+      text.textContent = `⚠️ FQ street cleaning — ${which}`;
+    } else {
+      bar.classList.add('mode-daytime');
+      text.textContent = '🅿️ Weekday daytime — green = free up to 2 hrs';
+    }
+
+    time.textContent = formatTime();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MAP SETUP
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const map = L.map('map', {
+    center: [29.9557, -90.0661],
+    zoom: 15,
+    zoomControl: false,
+  });
+
+  // Zoom control top-right
+  L.control.zoom({ position: 'topright' }).addTo(map);
+
+  // Light basemap (no API key needed)
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/">CARTO</a>',
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }).addTo(map);
+
+  // ── Blue dot for user location ──────────────────────────────────────────
+  let userMarker  = null;
+  let userCircle  = null;
+
+  function showLocation(latlng, accuracy) {
+    if (!userMarker) {
+      userMarker = L.circleMarker(latlng, {
+        radius: 8,
+        fillColor: '#3b82f6',
+        fillOpacity: 1,
+        color: '#fff',
+        weight: 2.5,
+        zIndexOffset: 500,
+      }).addTo(map).bindPopup('You are here');
+
+      userCircle = L.circle(latlng, {
+        radius: accuracy,
+        color: '#3b82f6',
+        fillColor: '#3b82f6',
+        fillOpacity: 0.1,
+        weight: 1,
+      }).addTo(map);
+    } else {
+      userMarker.setLatLng(latlng);
+      userCircle.setLatLng(latlng).setRadius(accuracy);
+    }
+  }
+
+  map.on('locationfound', e => showLocation(e.latlng, e.accuracy));
+  map.on('locationerror', () => {
+    document.getElementById('locate-btn').title = 'Location unavailable';
+  });
+
+  document.getElementById('locate-btn').addEventListener('click', () => {
+    map.locate({ setView: true, maxZoom: 16, enableHighAccuracy: true });
+  });
+
+  // ── Load GeoJSON and draw layers ────────────────────────────────────────
+  let rppLayer   = null;
+  let meterLayer = null;
+
+  function renderLayers(mode) {
+    if (rppLayer)   { map.removeLayer(rppLayer);   rppLayer   = null; }
+    if (meterLayer) { map.removeLayer(meterLayer); meterLayer = null; }
+
+    rppLayer = L.geoJSON(window._rppData, {
+      style:          f  => segmentStyle(f, mode),
+      onEachFeature:  (f, layer) => layer.bindPopup(segmentPopup(f, mode)),
+    }).addTo(map);
+
+    // Meters only shown during daytime (they're free in evening/weekend)
+    if (mode.mode !== 'evening') {
+      meterLayer = L.geoJSON(window._meterData, {
+        pointToLayer: (f, latlng) => L.circleMarker(latlng, {
+          radius:      4.5,
+          fillColor:   '#ca8a04',
+          fillOpacity: 0.85,
+          color:       '#854d0e',
+          weight:      1.2,
+        }),
+        onEachFeature: (f, layer) => layer.bindPopup(meterPopup(f)),
+      }).addTo(map);
+    }
+  }
+
+  // ── Periodic refresh (re-render if mode changes) ─────────────────────
+  let lastModeKey = '';
+
+  function refresh() {
+    const mode    = getParkingMode();
+    const modeKey = mode.mode + ':' + mode.cleaning;
+
+    updateStatusBar(mode);
+
+    if (modeKey !== lastModeKey && window._rppData) {
+      lastModeKey = modeKey;
+      renderLayers(mode);
+    }
+  }
+
+  // ── Fetch data files, then start ─────────────────────────────────────
+  Promise.all([
+    fetch('data/rpp_segments.geojson').then(r => r.json()),
+    fetch('data/meters.geojson').then(r => r.json()),
+  ]).then(([rpp, meters]) => {
+    window._rppData   = rpp;
+    window._meterData = meters;
+
+    const mode = getParkingMode();
+    lastModeKey = mode.mode + ':' + mode.cleaning;
+    updateStatusBar(mode);
+    renderLayers(mode);
+
+    // Try to get location automatically on first load
+    map.locate({ enableHighAccuracy: true });
+
+  }).catch(err => {
+    document.getElementById('status-text').textContent =
+      '⚠️ Could not load map data — ' + err.message;
+  });
+
+  // Refresh status bar every 30 s; re-render layers if time window changes
+  setInterval(refresh, 30_000);
+
+  // Initial status bar
+  updateStatusBar(getParkingMode());
+  </script>
+</body>
+</html>
