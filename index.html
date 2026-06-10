@@ -193,6 +193,14 @@
     return new Date(str);
   }
 
+  function isMeterPaid() {
+    const t    = nolaDate();
+    const day  = t.getDay();
+    const hour = t.getHours() + t.getMinutes() / 60;
+    // Paid Mon–Sat 8 am–7 pm; free all day Sunday and outside those hours
+    return day >= 1 && day <= 6 && hour >= 8 && hour < 19;
+  }
+
   function getParkingMode() {
     const t    = nolaDate();
     const day  = t.getDay();          // 0=Sun … 6=Sat
@@ -274,15 +282,21 @@
          + `<span style="color:#b45309">Over 2 hrs = $75 ticket</span>`;
   }
 
-  function meterPopup(feature) {
+  function meterPopup(feature, paid) {
     const p    = feature.properties;
     const type = p.meter_type === 'PS' ? 'Pay station' : 'Single-space meter';
     const nsp  = parseInt(p.num_spaces, 10) || 1;
+    const header = paid
+      ? `💳 <b>Paid meter</b> — ${type}`
+      : `✅ <b>Free now</b> — ${type}`;
+    const footer = paid
+      ? `<span style="color:#166534">Free after 7 pm &amp; Sundays</span>`
+      : `<span style="color:#555">Paid Mon–Sat 8 am–7 pm</span>`;
     return `<b>${p.street} block ${p.block}</b><br>`
-         + `💳 <b>Paid meter</b> — ${type}<br>`
+         + header + `<br>`
          + `${nsp} space${nsp !== 1 ? 's' : ''}`
          + `<br><span style="color:#555">ParkMobile zone ${p.parkmobile}</span>`
-         + `<br><span style="color:#166534">Free after 7 pm &amp; Sundays</span>`;
+         + `<br>` + footer;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -382,13 +396,16 @@
       onEachFeature:  (f, layer) => layer.bindPopup(segmentPopup(f, mode)),
     }).addTo(map);
 
-    // Meters only shown during daytime (they're free in evening/weekend)
-    if (mode.mode !== 'evening') {
-      meterLayer = L.geoJSON(window._meterData, {
-        style: () => ({ color: '#ca8a04', weight: 5, opacity: 0.9, lineCap: 'round' }),
-        onEachFeature: (f, layer) => layer.bindPopup(meterPopup(f)),
-      }).addTo(map);
-    }
+    const paid = isMeterPaid();
+    meterLayer = L.geoJSON(window._meterData, {
+      style: () => ({
+        color:   paid ? '#ca8a04' : '#22c55e',
+        weight:  5,
+        opacity: 0.9,
+        lineCap: 'round',
+      }),
+      onEachFeature: (f, layer) => layer.bindPopup(meterPopup(f, paid)),
+    }).addTo(map);
   }
 
   // ── Periodic refresh (re-render if mode changes) ─────────────────────
@@ -396,7 +413,7 @@
 
   function refresh() {
     const mode    = getParkingMode();
-    const modeKey = mode.mode + ':' + mode.cleaning;
+    const modeKey = mode.mode + ':' + mode.cleaning + ':' + isMeterPaid();
 
     updateStatusBar(mode);
 
@@ -415,7 +432,7 @@
     window._meterData = meters;
 
     const mode = getParkingMode();
-    lastModeKey = mode.mode + ':' + mode.cleaning;
+    lastModeKey = mode.mode + ':' + mode.cleaning + ':' + isMeterPaid();
     updateStatusBar(mode);
     renderLayers(mode);
 
