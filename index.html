@@ -130,7 +130,7 @@
       <span>Free up to 2 hrs (RPP zone)</span>
     </div>
     <div class="legend-row">
-      <div class="swatch-dot" style="background:#ca8a04; border: 2px solid #854d0e;"></div>
+      <div class="swatch-line" style="background:#ca8a04"></div>
       <span>Paid meter (free after 7 pm &amp; Sun)</span>
     </div>
     <div class="legend-row">
@@ -275,14 +275,13 @@
   }
 
   function meterPopup(feature) {
-    const p     = feature.properties;
-    const type  = p.type === 'PS' ? 'Pay station' : 'Single-space meter';
-    const nsp   = parseInt(p.num_spaces, 10) || 1;
-    const pm    = p.parkmobile ? `ParkMobile zone ${p.parkmobile}` : '';
+    const p    = feature.properties;
+    const type = p.meter_type === 'PS' ? 'Pay station' : 'Single-space meter';
+    const nsp  = parseInt(p.num_spaces, 10) || 1;
     return `<b>${p.street} block ${p.block}</b><br>`
          + `💳 <b>Paid meter</b> — ${type}<br>`
          + `${nsp} space${nsp !== 1 ? 's' : ''}`
-         + (pm ? `<br><span style="color:#555">${pm}</span>` : '')
+         + `<br><span style="color:#555">ParkMobile zone ${p.parkmobile}</span>`
          + `<br><span style="color:#166534">Free after 7 pm &amp; Sundays</span>`;
   }
 
@@ -386,13 +385,7 @@
     // Meters only shown during daytime (they're free in evening/weekend)
     if (mode.mode !== 'evening') {
       meterLayer = L.geoJSON(window._meterData, {
-        pointToLayer: (f, latlng) => L.circleMarker(latlng, {
-          radius:      4.5,
-          fillColor:   '#ca8a04',
-          fillOpacity: 0.85,
-          color:       '#854d0e',
-          weight:      1.2,
-        }),
+        style: () => ({ color: '#ca8a04', weight: 5, opacity: 0.9, lineCap: 'round' }),
         onEachFeature: (f, layer) => layer.bindPopup(meterPopup(f)),
       }).addTo(map);
     }
@@ -416,7 +409,7 @@
   // ── Fetch data files, then start ─────────────────────────────────────
   Promise.all([
     fetch('data/rpp_segments.geojson').then(r => r.json()),
-    fetch('data/meters.geojson').then(r => r.json()),
+    fetch('data/meter_segments.geojson').then(r => r.json()),
   ]).then(([rpp, meters]) => {
     window._rppData   = rpp;
     window._meterData = meters;
