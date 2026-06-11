@@ -125,18 +125,6 @@
 
   <div id="legend">
     <div id="legend-title">Parking guide</div>
-    <div class="legend-row">
-      <div class="swatch-line" style="background:#22c55e"></div>
-      <span>Free up to 2 hrs (RPP zone)</span>
-    </div>
-    <div class="legend-row">
-      <div class="swatch-line" style="background:#ca8a04"></div>
-      <span>Paid meter (free after 7 pm &amp; Sun)</span>
-    </div>
-    <div class="legend-row">
-      <div class="swatch-line" style="background:#ef4444"></div>
-      <span>TOW — street cleaning until noon</span>
-    </div>
   </div>
 
   <button id="locate-btn" title="Find my location">📍</button>
@@ -189,20 +177,15 @@
     return new Date(str);
   }
 
-  function isMeterPaid() {
-    const t    = nolaDate();
-    const day  = t.getDay();
-    const hour = t.getHours() + t.getMinutes() / 60;
-    // Paid Mon–Sat 8 am–7 pm; free all day Sunday and outside those hours
-    return day >= 1 && day <= 6 && hour >= 8 && hour < 19;
-  }
-
   function getParkingMode() {
     const t    = nolaDate();
     const day  = t.getDay();          // 0=Sun … 6=Sat
     const hour = t.getHours() + t.getMinutes() / 60;
 
-    const isWeekdayDaytime = day >= 1 && day <= 6 && hour >= 7 && hour < 19;
+    if (day === 0) return { mode: 'sunday', cleaning: null };
+
+    // Mon–Sat 8 am–7 pm is paid/enforced daytime
+    const isWeekdayDaytime = hour >= 8 && hour < 19;
 
     if (!isWeekdayDaytime) return { mode: 'evening', cleaning: null };
 
@@ -219,6 +202,42 @@
     const h    = t.getHours();
     const m    = t.getMinutes().toString().padStart(2, '0');
     return `${days[t.getDay()]} ${h % 12 || 12}:${m} ${h >= 12 ? 'pm' : 'am'}`;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LEGEND
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const LEGEND_CONFIGS = {
+    daytime: [
+      { color: '#22c55e', label: 'Free up to 2 hrs (RPP zone)' },
+      { color: '#ca8a04', label: 'Paid meter (free after 7 pm)' },
+    ],
+    cleaning: [
+      { color: '#22c55e', label: 'Free up to 2 hrs (RPP zone)' },
+      { color: '#ca8a04', label: 'Paid meter (free after 7 pm)' },
+      { color: '#ef4444', label: 'TOW — street cleaning until noon' },
+    ],
+    evening: [
+      { color: '#22c55e', label: 'Free (RPP zone)' },
+      { color: '#4ade80', label: 'Free til 8 am (metered zone)' },
+    ],
+    sunday: [
+      { color: '#22c55e', label: 'Free up to 2 hrs (RPP zone)' },
+      { color: '#4ade80', label: 'Free all day (metered zone)' },
+    ],
+  };
+
+  function updateLegend(mode) {
+    const legend = document.getElementById('legend');
+    legend.querySelectorAll('.legend-row').forEach(el => el.remove());
+    const rows = LEGEND_CONFIGS[mode.mode] || LEGEND_CONFIGS.daytime;
+    for (const { color, label } of rows) {
+      const row = document.createElement('div');
+      row.className = 'legend-row';
+      row.innerHTML = `<div class="swatch-line" style="background:${color}"></div><span>${label}</span>`;
+      legend.appendChild(row);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -261,28 +280,39 @@
            + `🚨 <b>TOW ZONE</b> — street cleaning<br>`
            + `No stopping until noon today`;
     }
+    if (mode.mode === 'sunday') {
+      return `<b>${name}</b><br>${block}`
+           + `✅ <b>Free — up to 2 hrs</b><br>`
+           + `<span style="color:#555">${zone} · Sunday</span><br>`
+           + `<span style="color:#b45309">Over 2 hrs = $75 ticket</span>`;
+    }
     if (mode.mode === 'evening') {
       return `<b>${name}</b><br>${block}`
-           + `🌙 Evening/Weekend<br>`
-           + `RPP not enforced — most curbs free`;
+           + `🌙 Evening<br>`
+           + `RPP not enforced — curb free overnight`;
     }
 
     return `<b>${name}</b><br>${block}`
          + `✅ <b>Free — up to 2 hrs</b><br>`
-         + `<span style="color:#555">${zone} · 7 am–7 pm Mon–Sat</span><br>`
+         + `<span style="color:#555">${zone} · 8 am–7 pm Mon–Sat</span><br>`
          + `<span style="color:#b45309">Over 2 hrs = $75 ticket</span>`;
   }
 
-  function meterPopup(feature, paid) {
+  function meterPopup(feature, mode) {
     const p    = feature.properties;
     const type = p.meter_type === 'PS' ? 'Pay station' : 'Single-space meter';
     const nsp  = parseInt(p.num_spaces, 10) || 1;
-    const header = paid
-      ? `💳 <b>Paid meter</b> — ${type}`
-      : `✅ <b>Free now</b> — ${type}`;
-    const footer = paid
-      ? `<span style="color:#166534">Free after 7 pm &amp; Sundays</span>`
-      : `<span style="color:#555">Paid Mon–Sat 8 am–7 pm</span>`;
+    let header, footer;
+    if (mode.mode === 'sunday') {
+      header = `✅ <b>Free now</b> — ${type}`;
+      footer = `<span style="color:#555">Free all day Sunday</span>`;
+    } else if (mode.mode === 'evening') {
+      header = `✅ <b>Free now</b> — ${type}`;
+      footer = `<span style="color:#555">Free until 8 am · paid Mon–Sat 8 am–7 pm</span>`;
+    } else {
+      header = `💳 <b>Paid meter</b> — ${type}`;
+      footer = `<span style="color:#166534">Free after 7 pm &amp; Sundays</span>`;
+    }
     return `<b>${p.street} block ${p.block}</b><br>`
          + header + `<br>`
          + `${nsp} space${nsp !== 1 ? 's' : ''}`
@@ -300,9 +330,12 @@
     const time = document.getElementById('status-time');
 
     bar.className = '';
-    if (mode.mode === 'evening') {
+    if (mode.mode === 'sunday') {
       bar.classList.add('mode-evening');
-      text.textContent = '🌙 Evening/Weekend — meters & RPP zones mostly free';
+      text.textContent = '☀️ Sunday — all meters free · RPP zones free up to 2 hrs';
+    } else if (mode.mode === 'evening') {
+      bar.classList.add('mode-evening');
+      text.textContent = '🌙 Evening — meters free til 8 am · RPP zones free';
     } else if (mode.mode === 'cleaning') {
       bar.classList.add('mode-cleaning');
       const which = mode.cleaning === 'cross'
@@ -311,7 +344,7 @@
       text.textContent = `⚠️ FQ street cleaning — ${which}`;
     } else {
       bar.classList.add('mode-daytime');
-      text.textContent = '🅿️ Weekday daytime — green = free up to 2 hrs';
+      text.textContent = '🅿️ Weekday daytime — green = free up to 2 hrs · amber = paid meter';
     }
 
     time.textContent = formatTime();
@@ -387,15 +420,15 @@
       onEachFeature:  (f, layer) => layer.bindPopup(segmentPopup(f, mode)),
     }).addTo(map);
 
-    const paid = isMeterPaid();
+    const meterFree = mode.mode === 'sunday' || mode.mode === 'evening';
     meterLayer = L.geoJSON(window._meterData, {
       style: () => ({
-        color:   paid ? '#ca8a04' : '#22c55e',
+        color:   meterFree ? '#4ade80' : '#ca8a04',
         weight:  5,
         opacity: 0.9,
         lineCap: 'round',
       }),
-      onEachFeature: (f, layer) => layer.bindPopup(meterPopup(f, paid)),
+      onEachFeature: (f, layer) => layer.bindPopup(meterPopup(f, mode)),
     }).addTo(map);
   }
 
@@ -404,9 +437,10 @@
 
   function refresh() {
     const mode    = getParkingMode();
-    const modeKey = mode.mode + ':' + mode.cleaning + ':' + isMeterPaid();
+    const modeKey = mode.mode + ':' + mode.cleaning;
 
     updateStatusBar(mode);
+    updateLegend(mode);
 
     if (modeKey !== lastModeKey && window._rppData) {
       lastModeKey = modeKey;
@@ -423,8 +457,9 @@
     window._meterData = meters;
 
     const mode = getParkingMode();
-    lastModeKey = mode.mode + ':' + mode.cleaning + ':' + isMeterPaid();
+    lastModeKey = mode.mode + ':' + mode.cleaning;
     updateStatusBar(mode);
+    updateLegend(mode);
     renderLayers(mode);
 
     // Try to get location automatically on first load
@@ -438,8 +473,10 @@
   // Refresh status bar every 30 s; re-render layers if time window changes
   setInterval(refresh, 30_000);
 
-  // Initial status bar
-  updateStatusBar(getParkingMode());
+  // Initial status bar and legend
+  const _initMode = getParkingMode();
+  updateStatusBar(_initMode);
+  updateLegend(_initMode);
   </script>
 </body>
 </html>
