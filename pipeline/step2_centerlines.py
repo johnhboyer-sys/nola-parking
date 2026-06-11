@@ -3,10 +3,15 @@ Step 2: Fetch street centerlines from data.nola.gov (dataset 22q2-dqpb).
 
 Each record includes address ranges (fromleft/toleft/fromright/toright) per
 segment, which step 3 uses to match meters by street name + block number.
-Outputs data/centerlines.geojson.
+Outputs data/centerlines.geojson and data/street_base.geojson.
+
+street_base.geojson is the geometry-only red base layer for the UI. It is
+filtered to only include streets within ANCHOR_RADIUS_M of a meter or RPP
+segment point, so the red layer stays bounded to the FQ/CBD coverage area.
 """
 
 import json
+import math
 import time
 import urllib.error
 import urllib.parse
@@ -14,6 +19,14 @@ import urllib.request
 from pathlib import Path
 
 BBOX = (29.927, -90.087, 29.968, -90.055)  # (south, west, north, east)
+
+# Streets further than this from any meter or RPP point are excluded from
+# the red base layer — keeps coverage within FQ/CBD rather than bleeding
+# into surrounding residential neighbourhoods.
+ANCHOR_RADIUS_M = 80
+
+M_PER_DEG_LAT = 111_000
+M_PER_DEG_LON =  96_200
 
 API_BASE  = "https://data.nola.gov/resource/22q2-dqpb.json"
 PAGE_SIZE = 1000
@@ -78,6 +91,38 @@ def _int(val):
         return None
 
 
+def _load_anchors(data_dir: Path) -> list:
+    """Return a flat list of [lon, lat] points from meters and RPP segments."""
+    anchors = []
+    for filename, geom_key in [("meters.geojson", None), ("rpp_segments.geojson", None)]:
+        path = data_dir / filename
+        if not path.exists():
+            continue
+        fc = json.loads(path.read_text())
+        for ft in fc["features"]:
+            geom = ft["geometry"]
+            if geom["type"] == "Point":
+                anchors.append(geom["coordinates"])
+            elif geom["type"] == "LineString":
+                anchors.extend(geom["coordinates"])
+            elif geom["type"] == "MultiLineString":
+                for ring in geom["coordinates"]:
+                    anchors.extend(ring)
+    return anchors
+
+
+def _near_anchor(coords, anchors, r_lat, r_lon, radius_m) -> bool:
+    """True if any vertex in coords is within radius_m of any anchor point."""
+    for cx, cy in coords:
+        for ax, ay in anchors:
+            if abs(cx - ax) > r_lon or abs(cy - ay) > r_lat:
+                continue
+            d = math.hypot((cx - ax) * M_PER_DEG_LON, (cy - ay) * M_PER_DEG_LAT)
+            if d <= radius_m:
+                return True
+    return False
+
+
 def main():
     print("Fetching NOLA centerlines from data.nola.gov…")
     print(f"  Bounding box: {BBOX}")
@@ -104,16 +149,26 @@ def main():
     )
     print(f"  Saved → {OUTPUT_PATH}")
 
-    # Geometry-only copy for the frontend red base layer (no address-range properties needed)
-    base_features = [
-        {"type": "Feature", "geometry": f["geometry"], "properties": {}}
-        for f in all_features
-    ]
+    # Geometry-only copy for the frontend red base layer, clipped to streets
+    # within ANCHOR_RADIUS_M of a meter or RPP segment point.
+    anchors = _load_anchors(OUTPUT_PATH.parent)
+    r_lat = ANCHOR_RADIUS_M / M_PER_DEG_LAT
+    r_lon = ANCHOR_RADIUS_M / M_PER_DEG_LON
+
+    base_features = []
+    for f in all_features:
+        coords = f["geometry"]["coordinates"]
+        if _near_anchor(coords, anchors, r_lat, r_lon, ANCHOR_RADIUS_M):
+            base_features.append(
+                {"type": "Feature", "geometry": f["geometry"], "properties": {}}
+            )
+
     base_path = OUTPUT_PATH.parent / "street_base.geojson"
     base_path.write_text(
         json.dumps({"type": "FeatureCollection", "features": base_features}),
         encoding="utf-8",
     )
+    print(f"  street_base: {len(base_features)} of {len(all_features)} streets kept")
     print(f"  Saved → {base_path}")
 
 
