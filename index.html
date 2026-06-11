@@ -135,7 +135,7 @@
     </div>
     <div class="legend-row">
       <div class="swatch-line" style="background:#ef4444"></div>
-      <span>No parking / tow zone</span>
+      <span>TOW — street cleaning until noon</span>
     </div>
   </div>
 
@@ -375,9 +375,8 @@
   });
 
   // ── Load GeoJSON and draw layers ────────────────────────────────────────
-  let streetBaseLayer = null;
-  let rppLayer        = null;
-  let meterLayer      = null;
+  let rppLayer   = null;
+  let meterLayer = null;
 
   function renderLayers(mode) {
     if (rppLayer)   { map.removeLayer(rppLayer);   rppLayer   = null; }
@@ -417,17 +416,11 @@
 
   // ── Fetch data files, then start ─────────────────────────────────────
   Promise.all([
-    fetch('data/street_base.geojson').then(r => r.json()),
     fetch('data/rpp_segments.geojson').then(r => r.json()),
     fetch('data/meter_segments.geojson').then(r => r.json()),
-  ]).then(([streets, rpp, meters]) => {
+  ]).then(([rpp, meters]) => {
     window._rppData   = rpp;
     window._meterData = meters;
-
-    // Red base layer — added first so RPP and meter layers paint over it
-    streetBaseLayer = L.geoJSON(streets, {
-      style: () => ({ color: '#ef4444', weight: 3, opacity: 0.55, lineCap: 'round' }),
-    }).addTo(map);
 
     const mode = getParkingMode();
     lastModeKey = mode.mode + ':' + mode.cleaning + ':' + isMeterPaid();
